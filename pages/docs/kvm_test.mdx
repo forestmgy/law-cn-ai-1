@@ -1,0 +1,207 @@
+# KVM实验
+
+**班级：2020211805	        学号：2020210665             姓名：马光煜**
+
+
+
+## 一 实验目的
+
+熟悉Linux环境下KVM的安装和使用
+
+（使用CentOS7进行实验）
+
+## 二 实验步骤
+
+### 1. 安装VMWare并在其上安装运行Linux虚拟机，并配置和宿主机的文件共享
+
+下载CentOS7镜像并进行安装
+
+在创建虚拟机时开启CPU VT-x 支持，如图所示
+
+![image-20230502095033996](D:\desktop\网站文章\pictures\image-20230502095033996.png)
+
+安装CentOS7后如图
+
+![image-20230502101332200](D:\desktop\网站文章\pictures\image-20230502101332200.png)
+
+### 2. 检查Linux host对虚拟化的支持（CPU svm标志位和kvm内核模块）
+
+检查svm标志位（本人电脑为AMD平台）
+
+![image-20230502103845699](D:\desktop\网站文章\pictures\image-20230502103845699.png)
+
+查看KVM
+
+![image-20230502103926424](D:\desktop\网站文章\pictures\image-20230502103926424.png)
+
+如图所示，已经加载KVM
+
+### 3. 在host上安装kvm相关包（qemu-kvm libvirt-bin virt-manager）
+
+安装相关软件包如图所示
+
+![image-20230502112413261](D:\desktop\网站文章\pictures\image-20230502112413261.png)
+
+启动libvirt
+
+![image-20230502112613447](D:\desktop\网站文章\pictures\image-20230502112613447.png)
+
+使用桥接设备关联网卡
+
+![image-20230502112913262](D:\desktop\网站文章\pictures\image-20230502112913262.png)
+
+### 4. 用virt-manager创建Linux虚拟机1
+
+命令行输入 virt-manager启动图形化界面
+
+![image-20230502113242359](D:\desktop\网站文章\pictures\image-20230502113242359.png)
+
+创建虚拟机，选择 Local Install Media安装
+
+![image-20230502113350976](D:\desktop\网站文章\pictures\image-20230502113350976.png)
+
+之后再下载之前的ISO镜像
+
+![image-20230502120356818](D:\desktop\网站文章\pictures\image-20230502120356818.png)
+
+如图所示，创建完成
+
+![image-20230502120636502](D:\desktop\网站文章\pictures\image-20230502120636502.png)
+
+之后启动虚拟机如图所示
+
+![image-20230502124913556](D:\desktop\网站文章\pictures\image-20230502124913556.png)
+
+### 5. 查看虚拟机ip，在其上安装ssh，并从host ssh登陆到虚拟机1
+
+先查看虚拟机1IP地址如图所示
+
+![image-20230502131144560](D:\desktop\网站文章\pictures\image-20230502131144560.png)
+
+之后使用ssh连接即可
+
+![image-20230502131224724](D:\desktop\网站文章\pictures\image-20230502131224724.png)
+
+如图所示连接成功
+
+### 6. 在虚拟机1上实现之前IaaS实验的程序并运行
+
+本人之前的实验为词频统计，使用ssh，复制粘贴源代码
+
+![image-20230502133331041](D:\desktop\网站文章\pictures\image-20230502133331041.png)
+
+![image-20230502133558087](D:\desktop\网站文章\pictures\image-20230502133558087.png)
+
+可以看到成功执行词频统计任务
+
+### 7. 用virt-manager创建虚拟机1的克隆虚拟机，并检查是否完全克隆了虚拟机1的环境，查看并比较两个虚拟机的镜像文件的大小，分析原因
+
+首先克隆，不过出错了
+
+![image-20230502151333262](D:\desktop\网站文章\pictures\image-20230502151333262.png)
+
+然后将原来的虚拟机设置为只读后可以分享硬盘，创建成功
+
+![image-20230502160144907](D:\desktop\网站文章\pictures\image-20230502160144907.png)
+
+*之后为了更方便的查看提示信息，本人将系统语言设置为了中文*
+
+观察两个虚拟机的配置文件
+
+发现除了uuid和mac地址以外全部一样
+
+下面是源虚拟机
+
+![image-20230503223810647](D:\desktop\网站文章\pictures\image-20230503223810647.png)
+
+![image-20230503223832481](D:\desktop\网站文章\pictures\image-20230503223832481.png)
+
+下面是克隆后的虚拟机
+
+![image-20230503223849824](D:\desktop\网站文章\pictures\image-20230503223849824.png)
+
+![image-20230503223945795](D:\desktop\网站文章\pictures\image-20230503223945795.png)
+
+比较大小：
+
+![image-20230503224333764](D:\desktop\网站文章\pictures\image-20230503224333764.png)
+
+由于我在克隆时将共享了原来的虚拟机
+
+![image-20230503225255929](D:\desktop\网站文章\pictures\image-20230503225255929.png)
+
+所以只有一个虚拟机镜像，但如果不共享的话，理论上来讲，克隆机的镜像文件会更小，这是因为KVM使用了qcow2格式的磁盘文件，而qcow2格式的磁盘文件支持压缩。
+
+### 8. 在克隆虚拟机上运行同样的程序，在两个虚拟机和host上观察对比CPU和内存资源占用情况
+
+运行一个普通的加法程序，源虚拟机
+
+![image-20230503225957228](D:\desktop\网站文章\pictures\image-20230503225957228.png)
+
+克隆虚拟机
+
+![image-20230503230200942](D:\desktop\网站文章\pictures\image-20230503230200942.png)
+
+差别不是很大，都是在刚开始升到很高，之后猛然下降
+
+查看内存
+
+![image-20230503230336592](D:\desktop\网站文章\pictures\image-20230503230336592.png)
+
+输入top命令查看内存占用和cpu占用，同样差别不是很大
+
+### 9. 在宿主机上安装、配置并启用selinux
+
+可以用sestatus命令查看selinux的开启状态，CentOS 6是默认开启的
+
+![image-20230506100558825](D:\desktop\网站文章\pictures\image-20230506100558825.png)
+
+如图所示，selinux是开启的，CentOS7是默认开启的
+
+### 10.在虚拟机关闭和启动的情况下，检查虚拟机镜像文件的MCS标签，以及虚拟机进程的MCS标签
+
+![image-20230506100859533](D:\desktop\网站文章\pictures\image-20230506100859533.png)
+
+如图所示为虚拟机运行时，镜像文件与进程的MCS标签
+
+![image-20230506101215048](D:\desktop\网站文章\pictures\image-20230506101215048.png)
+
+如图所示为虚拟机关闭后的镜像文件的MCS标签
+
+可以看到开启时，进程和镜像文件的标签是一致的，启动之前虚拟机并没有配置MCS标签。
+
+### 11. 通过在虚拟机上对host特定文件的访问，验证MCS标签的访问控制和对虚拟机的隔离作用
+
+拷贝用户默认bash，并查看selinux安全上下文
+
+<img src="D:\desktop\网站文章\pictures\image-20230506102615190.png" alt="image-20230506102615190" style="zoom:80%;" />
+
+
+
+将bash的类型改为qemu_exec_t，如图所示
+
+![image-20230506102731545](D:\desktop\网站文章\pictures\image-20230506102731545.png)
+
+
+
+以指定的安全上下文运行命令，使用 svirt_t s0:c0,c1 并新建一个文件写入本人学号和姓名缩写
+
+![image-20230506103058040](D:\desktop\网站文章\pictures\image-20230506103058040.png)
+
+
+
+![image-20230506103227949](D:\desktop\网站文章\pictures\image-20230506103227949.png)
+
+
+
+更改一下myname文件的MCS标签
+
+![image-20230506103737524](D:\desktop\网站文章\pictures\image-20230506103737524.png)
+
+
+
+再以S0:c0,c2的方式运行
+
+![image-20230506104242166](D:\desktop\网站文章\pictures\image-20230506104242166.png)
+
+成功显示本人姓名学号。

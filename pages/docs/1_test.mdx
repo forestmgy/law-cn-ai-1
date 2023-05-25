@@ -1,0 +1,136 @@
+## analysis of  dm-linear.c
+
+The provided code is a Linux kernel device-mapper target called "linear". A device-mapper target is a way to stack different virtual block devices (targets) on top of physical block devices. The "linear" target maps a linear range of sectors from one block device to another, with an optional offset.
+
+Here's a high-level overview of the code:
+
+- The "linear_c" struct defines the context for the "linear" target, which includes a pointer to the underlying block device ("dev") and the starting sector ("start") of the linear range.
+- The "linear_ctr" function is the constructor for the "linear" target. It is called when the target is created and initializes the "linear_c" context based on the arguments passed to it. It allocates memory for the "linear_c" struct, parses the arguments to extract the device path and offset, and performs error checking. It then gets the underlying device using the "dm_get_device" function, sets some properties of the "ti" (dm_target) struct, and returns 0 on success.
+- The "linear_dtr" function is the destructor for the "linear" target. It is called when the target is destroyed and frees the memory allocated for the "linear_c" context using "kfree".
+- The "linear_map_sector" function maps a virtual sector to a physical sector on the underlying block device based on the "linear_c" context and the sector offset.
+- The "linear_map" function remaps the I/O request to the appropriate location on the underlying block device based on the "linear_c" context and the "linear_map_sector" function. It sets the block device of the "bio" (I/O request) using "bio_set_dev" and updates the sector using "linear_map_sector". It returns "DM_MAPIO_REMAPPED" to indicate that the I/O request has been remapped.
+- The "linear_status" function provides status information for the "linear" target when requested by the user or tools. It generates a status string based on the "linear_c" context and the requested status type.
+- The "linear_prepare_ioctl" function prepares an ioctl request for the "linear" target. It sets the "bdev" (block device) parameter based on the "linear_c" context, and returns 1 if the device sizes do not match exactly, or 0 otherwise.
+- The "linear_report_zones" function reports the zones of the underlying block device that correspond to the linear range of the "linear" target. This function is only compiled if the kernel is configured with the CONFIG_BLK_DEV_ZONED option.
+- The "linear_iterate_devices" function iterates over the devices of the "linear" target and calls a callback function for each device. It passes the "linear_c" context and other parameters to the callback function.
+- The "linear_dax_pgoff" function translates a page offset to a physical offset on the underlying block device for Direct Access (DAX) operations. It uses the "linear_map_sector" function to calculate the physical offset and returns a pointer to the "dax_device" associated with the underlying block device.
+- The "linear_dax_direct_access" function provides direct access to the underlying block device for DAX operations. It calls the "dax_direct_access" function with the "dax_device" obtained from "linear_dax_pgoff".
+- The "linear_dax_zero_page_range" function zeros a range of pages on the underlying block device for DAX operations. It calls the "dax_zero_page_range" function with the "dax_device" obtained from "linear_dax_pgoff". This function is only compiled if the kernel is configured with the CONFIG_FS_DAX option.
+
+提供的代码是一个名为“linear”的Linux内核设备映射器目标。设备映射器目标是一种将不同的虚拟块设备（目标）堆叠在物理块设备上的方法。“linear”目标将一个块设备的线性扇区范围映射到另一个块设备上，并可选地进行偏移。
+
+以下是代码的高级概述：
+
+- “linear_c”结构体定义了“linear”目标的上下文，其中包括指向基础块设备（“dev”）和线性范围的起始扇区（“start”）的指针。
+- “linear_ctr”函数是“linear”目标的构造函数。当创建目标时调用它，并根据传递给它的参数初始化“linear_c”上下文。它为“linear_c”结构体分配内存，解析参数以提取设备路径和偏移量，并执行错误检查。然后使用“dm_get_device”函数获取底层设备，设置“ti”（dm_target）结构体的一些属性，并在成功时返回0。
+- “linear_dtr”函数是“linear”目标的析构函数。当目标被销毁时调用它，并使用“kfree”释放为“linear_c”上下文分配的内存。
+- “linear_map_sector”函数基于“linear_c”上下文和扇区偏移将虚拟扇区映射到基础块设备上的物理扇区。
+- “linear_map”函数基于“linear_c”上下文和“linear_map_sector”函数将I/O请求重新映射到底层块设备上的适当位置。它使用“bio_set_dev”设置“bio”（I/O请求）的块设备，并使用“linear_map_sector”更新扇区。它返回“DM_MAPIO_REMAPPED”以指示已重新映射I/O请求。
+- “linear_status”函数在用户或工具请求时为“linear”目标提供状态信息。它基于“linear_c”上下文和请求的状态类型生成状态字符串。
+- “linear_prepare_ioctl”函数为“linear”目标准备一个ioctl请求。它根据“linear_c”上下文设置“bdev”（块设备）参数，并在设备大小不完全匹配时返回1，否则返回0。
+- “linear_report_zones”函数报告与“linear”目标的线性范围相对应的底层块设备的区域。仅当内核配置了CONFIG_BLK_DEV_ZONED选项时才编译此函数。
+- “linear_iterate_devices”函数遍历“linear”目标的设备，并为每个设备调用回调函数。它将“linear_c”上下文和其他参数传递给回调函数。
+- “linear_dax_pgoff”函数将页面偏移转换为用于直接访问（DAX）操作的基础
+
+### conclusion
+
+Overall, the code appears to be an implementation of a device mapper target called "linear", which maps a linear range of a device. The code is written in C and is licensed under GPL-2.0-only.
+
+Let's go through the code and understand its functionality:
+
+1. The code defines a struct `linear_c` which represents the context of the linear target. It contains a pointer to a `dm_dev` structure representing the underlying device and a `start` sector which represents the starting sector of the linear range.
+2. The `linear_ctr` function is the constructor for the linear target. It is called when a new instance of the linear target is created. It takes as arguments a `struct dm_target` pointer (`ti`) representing the target, the number of arguments (`argc`) and an array of strings (`argv`) representing the arguments passed to the target.
+3. Inside `linear_ctr`, memory is allocated for a `linear_c` structure using `kmalloc` function. Then, the arguments passed to the target are parsed to extract the starting sector value and validate it. The `dm_get_device` function is called to get the `dm_dev` structure for the underlying device using the device path passed as an argument. If successful, the `num_flush_bios`, `num_discard_bios`, `num_secure_erase_bios`, and `num_write_zeroes_bios` fields of `ti` are set to 1 and the `private` field of `ti` is set to the allocated `linear_c` structure.
+4. The `linear_dtr` function is the destructor for the linear target. It is called when an instance of the linear target is destroyed. It frees the memory allocated for the `linear_c` structure and releases the reference to the underlying device using `dm_put_device` function.
+5. The `linear_map_sector` function takes a `struct dm_target` pointer and a sector value and maps it to the corresponding sector on the underlying device by adding the `start` sector of the linear range to the offset calculated by `dm_target_offset` function.
+6. The `linear_map` function is the main mapping function of the linear target. It takes a `struct dm_target` pointer and a `struct bio` pointer representing a bio request, and maps the bio to the corresponding sector on the underlying device using the `linear_map_sector` function. It also sets the `bi_dev` and `bi_sector` fields of the bio using `bio_set_dev` and `bio->bi_iter.bi_sector` respectively, and returns `DM_MAPIO_REMAPPED` to indicate that the bio has been remapped.
+7. The `linear_status` function is used to retrieve status information about the linear target. It takes a `struct dm_target` pointer, a `status_type_t` enum representing the type of status information requested, a `status_flags` value, a buffer to store the result, and the maximum length of the buffer. Depending on the `type` value, it generates a status string containing information about the underlying device and the start sector of the linear range.
+8. The `linear_prepare_ioctl` function is used to prepare for ioctl operations on the linear target. It takes a `struct dm_target` pointer and a double pointer to a `struct block_device` representing the block device associated with the ioctl operation. It sets the `bdev` pointer to the block device of the underlying device and returns 1 if the device sizes do not match exactly, indicating that the ioctl should not be passed through, otherwise it returns 0.
+9. The `linear_report_zones` function is an optional function that is only compiled if the CONFIG_BLK_DEV_ZONED configuration option is enabled. It is used to report
+
+总的来说，这段代码似乎是一个设备映射器目标的实现，称为“线性”，它映射了一个设备的线性范围。这段代码是用C语言编写的，使用GPL-2.0-only许可证。
+
+让我们逐步了解代码的功能：
+
+1. 该代码定义了一个称为“linear_c”的结构体，表示线性目标的上下文。它包含一个指向表示底层设备的“dm_dev”结构的指针和一个表示线性范围起始扇区的“start”扇区。
+2. “linear_ctr”函数是线性目标的构造函数。当创建线性目标的新实例时，它被调用。它以一个表示目标的“struct dm_target”指针（“ti”）、一个表示参数数量的“argc”和一个表示传递给目标的参数的字符串数组“argv”作为参数。
+3. 在“linear_ctr”内部，使用“kmalloc”函数为“linear_c”结构分配内存。然后，解析传递给目标的参数以提取起始扇区值并进行验证。使用传递的设备路径调用“dm_get_device”函数以获取表示底层设备的“dm_dev”结构。如果成功，则将“ti”的“num_flush_bios”、“num_discard_bios”、“num_secure_erase_bios”和“num_write_zeroes_bios”字段设置为1，并将“ti”的“private”字段设置为已分配的“linear_c”结构。
+4. “linear_dtr”函数是线性目标的析构函数。当线性目标的实例被销毁时，它会释放为“linear_c”结构分配的内存并使用“dm_put_device”函数释放对底层设备的引用。
+5. “linear_map_sector”函数接受一个“struct dm_target”指针和一个扇区值，并将其映射到底层设备上的相应扇区，方法是将线性范围的“start”扇区加到“dm_target_offset”函数计算的偏移量上。
+6. “linear_map”函数是线性目标的主映射函数。它接受一个表示bio请求的“struct bio”指针和一个“struct dm_target”指针，并使用“linear_map_sector”函数将bio映射到底层设备上的相应扇区。它还使用“bio_set_dev”和“bio->bi_iter.bi_sector”分别设置bio的“bi_dev”和“bi_sector”字段，并返回“DM_MAPIO_REMAPPED”，表示已重新映射bio。
+
+## analysis of  dm-stripe.c
+
+The code is for a Linux device-mapper target called "striped" which implements a striped mapping on top of multiple block devices. The striped mapping is a RAID0-like configuration where data is striped across multiple block devices for increased performance, but without any redundancy.
+
+Let's analyze the code in more detail:
+
+- The code includes necessary header files for device-mapper, Linux kernel modules, block device operations, and work queue management.
+- It defines a static struct `stripe` representing a single stripe in the striped mapping. It contains a pointer to the `dm_dev` structure representing a block device, and the physical start sector of the stripe.
+- It defines a static struct `stripe_c` representing the striped mapping target. It contains information such as the number of stripes, chunk size, stripe width, work struct for triggering events, and an array of `stripe` structures to store the information of each stripe in the mapping.
+- It defines a static function `trigger_event()` which is called as a work handler when a drive drops out of the striped volume. It triggers an event in the device-mapper framework to notify the upper layers.
+- It defines a static function `get_stripe()` which parses a single stripe's information from the command-line arguments passed during target instantiation.
+- It defines a static function `stripe_ctr()` which is the constructor function for the striped mapping target. It validates the arguments passed during target instantiation, allocates memory for the `stripe_c` structure, sets up necessary fields in the structure, and parses the information of each stripe using the `get_stripe()` function.
+- It defines a static function `stripe_dtr()` which is the destructor function for the striped mapping target. It releases the resources acquired during target instantiation, such as releasing the block devices using `dm_put_device()` and freeing the memory allocated for the `stripe_c` structure.
+- It defines a static function `stripe_map_sector()` which maps a logical sector to a physical sector on the striped mapping. It calculates the corresponding stripe and chunk for the given logical sector, and then calculates the physical sector within that stripe and chunk. The physical sector is returned as the result.
+- It defines a static function `stripe_status()` which is a placeholder for future development and currently does nothing.
+- Finally, it registers the striped mapping target with the device-mapper framework using the `DM_INIT_TARGET()` macro, which sets up the target's name, constructor, destructor, and other function pointers.
+
+这段代码是用于 Linux 设备映射目标的，叫做 "striped"，它在多个块设备上实现了条带映射。条带映射是一种 RAID0 配置，数据被分散存储在多个块设备上以提高性能，但没有任何冗余。
+
+让我们更详细地分析一下代码：
+
+- 代码包括了设备映射、Linux 内核模块、块设备操作和工作队列管理所需的头文件。
+- 它定义了一个静态结构体 `stripe`，表示条带映射中的单个条带。它包含一个指向 `dm_dev` 结构体（表示块设备）的指针和条带的物理起始扇区。
+- 它定义了一个静态结构体 `stripe_c`，表示条带映射目标。它包含信息，例如条带数量、块大小、条带宽度、用于触发事件的工作结构和一个 `stripe` 结构体数组，以存储映射中每个条带的信息。
+- 它定义了一个静态函数 `trigger_event()`，当驱动器从条带卷中退出时作为工作处理程序调用它，在设备映射框架中触发事件以通知上层。
+- 它定义了一个静态函数 `get_stripe()`，从目标实例化时传递的命令行参数中解析单个条带的信息。
+- 它定义了一个静态函数 `stripe_ctr()`，它是条带映射目标的构造函数。它验证了目标实例化时传递的参数，为 `stripe_c` 结构分配内存，设置结构中必要的字段，并使用 `get_stripe()` 函数解析每个条带的信息。
+- 它定义了一个静态函数 `stripe_dtr()`，它是条带映射目标的析构函数。它释放目标实例化期间获取的资源，例如使用 `dm_put_device()` 释放块设备并释放为 `stripe_c` 结构体分配的内存。
+- 它定义了一个静态函数 `stripe_map_sector()`，将逻辑扇区映射到条带映射上的物理扇区。它计算给定逻辑扇区的相应条带和块，然后计算该条带和块内的物理扇区。物理扇区作为结果返回。
+- 它定义了一个静态函数 `stripe_status()`，作为未来开发的占位符，目前不做任何操作。
+- 最后，它使用 `DM_INIT_TARGET()` 宏向设备映射框架注册条带映射目标，该宏设置目标的名称、构造函数、析构函数和其他函数指针。
+
+### How `map` works
+
+The `stripe_map_sector()` function is the mapping function used by the striped device-mapper target. It calculates the corresponding stripe and chunk within the stripe for a given sector, and then maps it to the appropriate physical block on the underlying devices.
+
+The function takes three input parameters:
+
+1. `sc`: A pointer to the `struct stripe_c` representing the striped target context.
+2. `sector`: The sector number being mapped.
+3. `bio`: A pointer to the bio structure representing the I/O operation.
+
+The function first calculates the stripe index and chunk index within the stripe for the given sector. The stripe index is calculated as `stripe_idx = (sector >> sc->stripe_width_shift) & sc->stripes_mask`, where `sc->stripe_width_shift` is the logarithm base 2 of the stripe width (number of sectors in a stripe), and `sc->stripes_mask` is a mask with the lower `sc->stripes_shift` bits set to 1. The chunk index within the stripe is calculated as `chunk_idx = (sector >> sc->chunk_size_shift) & sc->chunk_mask`, where `sc->chunk_size_shift` is the logarithm base 2 of the chunk size (number of sectors in a chunk), and `sc->chunk_mask` is a mask with the lower `sc->chunk_size_shift` bits set to 1.
+
+Next, the function calculates the physical sector number on the underlying device for the corresponding stripe and chunk using the formula `physical_sector = (stripe_idx << sc->stripe_width_shift) + (chunk_idx << sc->chunk_size_shift)`. This is the physical sector number to which the I/O operation will be mapped.
+
+Finally, the function sets the appropriate fields in the `bio` structure to map the I/O operation to the calculated physical sector on the appropriate underlying device. It sets the `bio->bi_bdev` field to the `dev` field of the corresponding stripe in `sc`, and sets the `bio->bi_sector` field to the calculated physical sector number.
+
+In summary, the `stripe_map_sector()` function calculates the stripe and chunk indices for a given sector, and maps it to the appropriate physical sector on the underlying devices for the striped device-mapper target.
+
+`stripe_map_sector()`函数是用于striped device-mapper target的映射函数。它计算给定扇区的相应条带和条带中块的索引，然后将其映射到底层设备上的相应物理块。
+
+该函数有三个输入参数：
+
+1. `sc`：指向表示条带目标上下文的 `struct stripe_c` 的指针。
+2. `sector`：正在映射的扇区号。
+3. `bio`：指向表示I/O操作的bio结构的指针。
+
+该函数首先计算给定扇区的条带索引和条带中块的索引。条带索引的计算公式为 `stripe_idx = (sector >> sc->stripe_width_shift) & sc->stripes_mask`，其中 `sc->stripe_width_shift` 是条带宽度（条带中扇区数）的以2为底的对数，`sc->stripes_mask` 是一个掩码，将低 `sc->stripes_shift` 位设置为1。在条带内的块索引计算公式为 `chunk_idx = (sector >> sc->chunk_size_shift) & sc->chunk_mask`，其中 `sc->chunk_size_shift` 是块大小（块中扇区数）的以2为底的对数，`sc->chunk_mask` 是一个掩码，将低 `sc->chunk_size_shift` 位设置为1。
+
+接下来，该函数使用公式 `physical_sector = (stripe_idx << sc->stripe_width_shift) + (chunk_idx << sc->chunk_size_shift)` 计算相应条带和块上的底层设备上的物理扇区号。这是将映射I/O操作的物理扇区号。
+
+最后，该函数设置`bio`结构中的适当字段，将I/O操作映射到相应底层设备上的计算物理扇区。它将 `bio->bi_bdev` 字段设置为 `sc` 中相应条带的 `dev` 字段，并将 `bio->bi_sector` 字段设置为计算得到的物理扇区号。
+
+总之，`stripe_map_sector()`函数计算给定扇区的条带和块索引，并将其映射到striped device-mapper目标底层设备上的适当物理扇区。
+
+---
+
+这段 Linux 内核代码是用于 RAID （Redundant Array of Inexpensive Disks，廉价磁盘冗余阵列）或类似技术的设备映射。具体来说，这个函数实现了一个条带化（striping）映射，将一个输入的块设备操作（bio）映射到一个或多个磁盘上。
+
+函数首先通过 ti->private 获取 stripe_c 结构体的指针 sc。然后，它检查传递给函数的操作是否需要执行预刷（flush）操作。如果是，那么它会根据目标 bio 的编号，使用 sc->stripe[target_bio_nr].dev->bdev 来更新 bio 的设备。这个操作完成后，函数返回 DM_MAPIO_REMAPPED。
+
+如果输入的操作是丢弃（discard）、安全擦除（secure erase）或写入零（write zeroes），那么函数会调用 stripe_map_range 函数来映射整个范围。
+
+如果输入的操作不是上述情况，那么函数会调用 stripe_map_sector 函数，将输入的块设备操作映射到具体的磁盘块。具体来说，它会通过 sector 计算条带的编号 stripe，并使用 sc->stripe[stripe].physical_start 来计算出磁盘上的偏移量。最后，函数会使用更新后的偏移量和设备来更新输入的块设备操作，并返回 DM_MAPIO_REMAPPED。

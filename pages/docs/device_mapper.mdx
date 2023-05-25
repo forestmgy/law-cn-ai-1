@@ -1,0 +1,755 @@
+## linear volume 分析
+
+```c
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Copyright (C) 2001-2003 Sistina Software (UK) Limited.
+ *
+ * This file is released under the GPL.
+ */
+
+#include "dm.h"
+#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/blkdev.h>
+#include <linux/bio.h>
+#include <linux/dax.h>
+#include <linux/slab.h>
+#include <linux/device-mapper.h>
+
+#define DM_MSG_PREFIX "linear"
+
+/*
+ * Linear: maps a linear range of a device.
+ */
+//“linear_c”结构体定义了“linear”目标的上下文，其中包括指向基础块设备（“dev”）和线性范围的起始扇区（“start”）的指针。
+struct linear_c {
+	struct dm_dev *dev;
+	sector_t start;
+};
+
+/*
+ * Construct a linear mapping: <dev_path> <offset>
+ */
+//“linear_ctr”函数是“linear”目标的构造函数。当创建目标时调用它，并根据传递给它的参数初始化“linear_c”上下文。它为“linear_c”结构体分配内存，解析参数以提取设备路径和偏移量，并执行错误检查。然后使用“dm_get_device”函数获取底层设备，设置“ti”（dm_target）结构体的一些属性，并在成功时返回0。
+static int linear_ctr(struct dm_target *ti, unsigned int argc, char **argv)
+{
+	struct linear_c *lc;
+	unsigned long long tmp;
+	char dummy;
+	int ret;
+
+	if (argc != 2) {
+		ti->error = "Invalid argument count";
+		return -EINVAL;
+	}
+
+	lc = kmalloc(sizeof(*lc), GFP_KERNEL);
+	if (lc == NULL) {
+		ti->error = "Cannot allocate linear context";
+		return -ENOMEM;
+	}
+
+	ret = -EINVAL;
+	if (sscanf(argv[1], "%llu%c", &tmp, &dummy) != 1 || tmp != (sector_t)tmp) {
+		ti->error = "Invalid device sector";
+		goto bad;
+	}
+	lc->start = tmp;
+
+	ret = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &lc->dev);
+	if (ret) {
+		ti->error = "Device lookup failed";
+		goto bad;
+	}
+
+	ti->num_flush_bios = 1;
+	ti->num_discard_bios = 1;
+	ti->num_secure_erase_bios = 1;
+	ti->num_write_zeroes_bios = 1;
+	ti->private = lc;
+	return 0;
+
+bad:
+	kfree(lc);
+	return ret;
+}
+//“linear_dtr”函数是“linear”目标的析构函数。当目标被销毁时调用它，并使用“kfree”释放为“linear_c”上下文分配的内存
+static void linear_dtr(struct dm_target *ti)
+{
+	struct linear_c *lc = (struct linear_c *) ti->private;
+
+	dm_put_device(ti, lc->dev);
+	kfree(lc);
+}
+//“linear_map_sector”函数基于“linear_c”上下文和扇区偏移将虚拟扇区映射到基础块设备上的物理扇区。
+static sector_t linear_map_sector(struct dm_target *ti, sector_t bi_sector)
+{
+	struct linear_c *lc = ti->private;
+
+	return lc->start + dm_target_offset(ti, bi_sector);
+}
+//“linear_map”函数基于“linear_c”上下文和“linear_map_sector”函数将I/O请求重新映射到底层块设备上的适当位置。它使用“bio_set_dev”设置“bio”（I/O请求）的块设备，并使用“linear_map_sector”更新扇区。它返回“DM_MAPIO_REMAPPED”以指示已重新映射I/O请求。它接受一个表示bio请求的“struct bio”指针和一个“struct dm_target”指针，并使用“linear_map_sector”函数将bio映射到底层设备上的相应扇区。它还使用“bio_set_dev”和“bio->bi_iter.bi_sector”分别设置bio的“bi_dev”和“bi_sector”字段，并返回“DM_MAPIO_REMAPPED”，表示已重新映射bio。
+static int linear_map(struct dm_target *ti, struct bio *bio)
+{
+	struct linear_c *lc = ti->private;
+
+	bio_set_dev(bio, lc->dev->bdev);
+	bio->bi_iter.bi_sector = linear_map_sector(ti, bio->bi_iter.bi_sector);
+
+	return DM_MAPIO_REMAPPED;
+}
+//“linear_status”函数在用户或工具请求时为“linear”目标提供状态信息。它基于“linear_c”上下文和请求的状态类型生成状态字符串。
+static void linear_status(struct dm_target *ti, status_type_t type,
+			  unsigned int status_flags, char *result, unsigned int maxlen)
+{
+	struct linear_c *lc = (struct linear_c *) ti->private;
+	size_t sz = 0;
+
+	switch (type) {
+	case STATUSTYPE_INFO:
+		result[0] = '\0';
+		break;
+
+	case STATUSTYPE_TABLE:
+		DMEMIT("%s %llu", lc->dev->name, (unsigned long long)lc->start);
+		break;
+
+	case STATUSTYPE_IMA:
+		DMEMIT_TARGET_NAME_VERSION(ti->type);
+		DMEMIT(",device_name=%s,start=%llu;", lc->dev->name,
+		       (unsigned long long)lc->start);
+		break;
+	}
+}
+//“linear_prepare_ioctl”函数为“linear”目标准备一个ioctl请求。它根据“linear_c”上下文设置“bdev”（块设备）参数，并在设备大小不完全匹配时返回1，否则返回0。
+static int linear_prepare_ioctl(struct dm_target *ti, struct block_device **bdev)
+{
+	struct linear_c *lc = (struct linear_c *) ti->private;
+	struct dm_dev *dev = lc->dev;
+
+	*bdev = dev->bdev;
+
+	/*
+	 * Only pass ioctls through if the device sizes match exactly.
+	 */
+	if (lc->start || ti->len != bdev_nr_sectors(dev->bdev))
+		return 1;
+	return 0;
+}
+
+#ifdef CONFIG_BLK_DEV_ZONED
+static int linear_report_zones(struct dm_target *ti,
+		struct dm_report_zones_args *args, unsigned int nr_zones)
+{
+	struct linear_c *lc = ti->private;
+
+	return dm_report_zones(lc->dev->bdev, lc->start,
+			       linear_map_sector(ti, args->next_sector),
+			       args, nr_zones);
+}
+#else
+#define linear_report_zones NULL
+#endif
+
+static int linear_iterate_devices(struct dm_target *ti,
+				  iterate_devices_callout_fn fn, void *data)
+{
+	struct linear_c *lc = ti->private;
+
+	return fn(ti, lc->dev, lc->start, ti->len, data);
+}
+
+#if IS_ENABLED(CONFIG_FS_DAX)
+static struct dax_device *linear_dax_pgoff(struct dm_target *ti, pgoff_t *pgoff)
+{
+	struct linear_c *lc = ti->private;
+	sector_t sector = linear_map_sector(ti, *pgoff << PAGE_SECTORS_SHIFT);
+
+	*pgoff = (get_start_sect(lc->dev->bdev) + sector) >> PAGE_SECTORS_SHIFT;
+	return lc->dev->dax_dev;
+}
+
+static long linear_dax_direct_access(struct dm_target *ti, pgoff_t pgoff,
+		long nr_pages, enum dax_access_mode mode, void **kaddr,
+		pfn_t *pfn)
+{
+	struct dax_device *dax_dev = linear_dax_pgoff(ti, &pgoff);
+
+	return dax_direct_access(dax_dev, pgoff, nr_pages, mode, kaddr, pfn);
+}
+
+static int linear_dax_zero_page_range(struct dm_target *ti, pgoff_t pgoff,
+				      size_t nr_pages)
+{
+	struct dax_device *dax_dev = linear_dax_pgoff(ti, &pgoff);
+
+	return dax_zero_page_range(dax_dev, pgoff, nr_pages);
+}
+
+static size_t linear_dax_recovery_write(struct dm_target *ti, pgoff_t pgoff,
+		void *addr, size_t bytes, struct iov_iter *i)
+{
+	struct dax_device *dax_dev = linear_dax_pgoff(ti, &pgoff);
+
+	return dax_recovery_write(dax_dev, pgoff, addr, bytes, i);
+}
+
+#else
+#define linear_dax_direct_access NULL
+#define linear_dax_zero_page_range NULL
+#define linear_dax_recovery_write NULL
+#endif
+
+static struct target_type linear_target = {
+	.name   = "linear",
+	.version = {1, 4, 0},
+	.features = DM_TARGET_PASSES_INTEGRITY | DM_TARGET_NOWAIT |
+		    DM_TARGET_ZONED_HM | DM_TARGET_PASSES_CRYPTO,
+	.report_zones = linear_report_zones,
+	.module = THIS_MODULE,
+	.ctr    = linear_ctr,
+	.dtr    = linear_dtr,
+	.map    = linear_map,
+	.status = linear_status,
+	.prepare_ioctl = linear_prepare_ioctl,
+	.iterate_devices = linear_iterate_devices,
+	.direct_access = linear_dax_direct_access,
+	.dax_zero_page_range = linear_dax_zero_page_range,
+	.dax_recovery_write = linear_dax_recovery_write,
+};
+
+int __init dm_linear_init(void)
+{
+	int r = dm_register_target(&linear_target);
+
+	if (r < 0)
+		DMERR("register failed %d", r);
+
+	return r;
+}
+
+void dm_linear_exit(void)
+{
+	dm_unregister_target(&linear_target);
+}
+```
+
+## stripe volume 分析
+
+```c
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Copyright (C) 2001-2003 Sistina Software (UK) Limited.
+ *
+ * This file is released under the GPL.
+ */
+
+#include "dm.h"
+#include <linux/device-mapper.h>
+
+#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/blkdev.h>
+#include <linux/bio.h>
+#include <linux/dax.h>
+#include <linux/slab.h>
+#include <linux/log2.h>
+
+static struct workqueue_struct *dm_stripe_wq;
+
+#define DM_MSG_PREFIX "striped"
+#define DM_IO_ERROR_THRESHOLD 15
+//定义了一个静态结构体 `stripe`，表示条带映射中的单个条带。它包含一个指向 `dm_dev` 结构体（表示块设备）的指针和条带的物理起始扇区
+struct stripe {
+	struct dm_dev *dev;
+	sector_t physical_start;
+
+	atomic_t error_count;
+};
+//定义了一个静态结构体 `stripe_c`，表示条带映射目标。它包含信息，例如条带数量、块大小、条带宽度、用于触发事件的工作结构和一个 `stripe` 结构体数组，以存储映射中每个条带的信息。
+struct stripe_c {
+	uint32_t stripes;
+	int stripes_shift;
+
+	/* The size of this target / num. stripes */
+	sector_t stripe_width;
+
+	uint32_t chunk_size;
+	int chunk_size_shift;
+
+	/* Needed for handling events */
+	struct dm_target *ti;
+
+	/* Work struct used for triggering events*/
+	struct work_struct trigger_event;
+
+	struct stripe stripe[];
+};
+
+/*
+ * An event is triggered whenever a drive
+ * drops out of a stripe volume.
+ 当驱动器从条带卷中退出时作为工作处理程序调用它，在设备映射框架中触发事件以通知上层。
+ */
+static void trigger_event(struct work_struct *work)
+{
+	struct stripe_c *sc = container_of(work, struct stripe_c,
+					   trigger_event);
+	dm_table_event(sc->ti->table);
+}
+
+/*
+ * Parse a single <dev> <sector> pair
+ 从目标实例化时传递的命令行参数中解析单个条带的信息。
+ */
+static int get_stripe(struct dm_target *ti, struct stripe_c *sc,
+		      unsigned int stripe, char **argv)
+{
+	unsigned long long start;
+	char dummy;
+	int ret;
+
+	if (sscanf(argv[1], "%llu%c", &start, &dummy) != 1)
+		return -EINVAL;
+
+	ret = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table),
+			    &sc->stripe[stripe].dev);
+	if (ret)
+		return ret;
+
+	sc->stripe[stripe].physical_start = start;
+
+	return 0;
+}
+
+/*
+ * Construct a striped mapping.
+ * <number of stripes> <chunk size> [<dev_path> <offset>]+
+ 条带映射目标的构造函数。它验证了目标实例化时传递的参数，为 `stripe_c` 结构分配内存，设置结构中必要的字段，并使用 `get_stripe()` 函数解析每个条带的信息。
+ */
+static int stripe_ctr(struct dm_target *ti, unsigned int argc, char **argv)
+{
+	struct stripe_c *sc;
+	sector_t width, tmp_len;
+	uint32_t stripes;
+	uint32_t chunk_size;
+	int r;
+	unsigned int i;
+
+	if (argc < 2) {
+		ti->error = "Not enough arguments";
+		return -EINVAL;
+	}
+
+	if (kstrtouint(argv[0], 10, &stripes) || !stripes) {
+		ti->error = "Invalid stripe count";
+		return -EINVAL;
+	}
+
+	if (kstrtouint(argv[1], 10, &chunk_size) || !chunk_size) {
+		ti->error = "Invalid chunk_size";
+		return -EINVAL;
+	}
+
+	width = ti->len;
+	if (sector_div(width, stripes)) {
+		ti->error = "Target length not divisible by number of stripes";
+		return -EINVAL;
+	}
+
+	tmp_len = width;
+	if (sector_div(tmp_len, chunk_size)) {
+		ti->error = "Target length not divisible by chunk size";
+		return -EINVAL;
+	}
+
+	/*
+	 * Do we have enough arguments for that many stripes ?
+	 */
+	if (argc != (2 + 2 * stripes)) {
+		ti->error = "Not enough destinations specified";
+		return -EINVAL;
+	}
+
+	sc = kmalloc(struct_size(sc, stripe, stripes), GFP_KERNEL);
+	if (!sc) {
+		ti->error = "Memory allocation for striped context failed";
+		return -ENOMEM;
+	}
+
+	INIT_WORK(&sc->trigger_event, trigger_event);
+
+	/* Set pointer to dm target; used in trigger_event */
+	sc->ti = ti;
+	sc->stripes = stripes;
+	sc->stripe_width = width;
+
+	if (stripes & (stripes - 1))
+		sc->stripes_shift = -1;
+	else
+		sc->stripes_shift = __ffs(stripes);
+
+	r = dm_set_target_max_io_len(ti, chunk_size);
+	if (r) {
+		kfree(sc);
+		return r;
+	}
+
+	ti->num_flush_bios = stripes;
+	ti->num_discard_bios = stripes;
+	ti->num_secure_erase_bios = stripes;
+	ti->num_write_zeroes_bios = stripes;
+
+	sc->chunk_size = chunk_size;
+	if (chunk_size & (chunk_size - 1))
+		sc->chunk_size_shift = -1;
+	else
+		sc->chunk_size_shift = __ffs(chunk_size);
+
+	/*
+	 * Get the stripe destinations.
+	 */
+	for (i = 0; i < stripes; i++) {
+		argv += 2;
+
+		r = get_stripe(ti, sc, i, argv);
+		if (r < 0) {
+			ti->error = "Couldn't parse stripe destination";
+			while (i--)
+				dm_put_device(ti, sc->stripe[i].dev);
+			kfree(sc);
+			return r;
+		}
+		atomic_set(&(sc->stripe[i].error_count), 0);
+	}
+
+	ti->private = sc;
+
+	return 0;
+}
+//条带映射目标的析构函数。它释放目标实例化期间获取的资源，例如使用 `dm_put_device()` 释放块设备并释放为 `stripe_c` 结构体分配的内存。
+static void stripe_dtr(struct dm_target *ti)
+{
+	unsigned int i;
+	struct stripe_c *sc = (struct stripe_c *) ti->private;
+
+	for (i = 0; i < sc->stripes; i++)
+		dm_put_device(ti, sc->stripe[i].dev);
+
+	flush_work(&sc->trigger_event);
+	kfree(sc);
+}
+//将逻辑扇区映射到条带映射上的物理扇区。它计算给定逻辑扇区的相应条带和块，然后计算该条带和块内的物理扇区。物理扇区作为结果返回。
+static void stripe_map_sector(struct stripe_c *sc, sector_t sector,
+			      uint32_t *stripe, sector_t *result)
+{
+	sector_t chunk = dm_target_offset(sc->ti, sector);
+	sector_t chunk_offset;
+
+	if (sc->chunk_size_shift < 0)
+		chunk_offset = sector_div(chunk, sc->chunk_size);
+	else {
+		chunk_offset = chunk & (sc->chunk_size - 1);
+		chunk >>= sc->chunk_size_shift;
+	}
+
+	if (sc->stripes_shift < 0)
+		*stripe = sector_div(chunk, sc->stripes);
+	else {
+		*stripe = chunk & (sc->stripes - 1);
+		chunk >>= sc->stripes_shift;
+	}
+
+	if (sc->chunk_size_shift < 0)
+		chunk *= sc->chunk_size;
+	else
+		chunk <<= sc->chunk_size_shift;
+
+	*result = chunk + chunk_offset;
+}
+
+static void stripe_map_range_sector(struct stripe_c *sc, sector_t sector,
+				    uint32_t target_stripe, sector_t *result)
+{
+	uint32_t stripe;
+
+	stripe_map_sector(sc, sector, &stripe, result);
+	if (stripe == target_stripe)
+		return;
+
+	/* round down */
+	sector = *result;
+	if (sc->chunk_size_shift < 0)
+		*result -= sector_div(sector, sc->chunk_size);
+	else
+		*result = sector & ~(sector_t)(sc->chunk_size - 1);
+
+	if (target_stripe < stripe)
+		*result += sc->chunk_size;		/* next chunk */
+}
+
+static int stripe_map_range(struct stripe_c *sc, struct bio *bio,
+			    uint32_t target_stripe)
+{
+	sector_t begin, end;
+
+	stripe_map_range_sector(sc, bio->bi_iter.bi_sector,
+				target_stripe, &begin);
+	stripe_map_range_sector(sc, bio_end_sector(bio),
+				target_stripe, &end);
+	if (begin < end) {
+		bio_set_dev(bio, sc->stripe[target_stripe].dev->bdev);
+		bio->bi_iter.bi_sector = begin +
+			sc->stripe[target_stripe].physical_start;
+		bio->bi_iter.bi_size = to_bytes(end - begin);
+		return DM_MAPIO_REMAPPED;
+	}
+
+	/* The range doesn't map to the target stripe */
+	bio_endio(bio);
+	return DM_MAPIO_SUBMITTED;
+}
+/*
+这个函数实现了一个条带化（striping）映射，将一个输入的块设备操作（bio）映射到一个或多个磁盘上。
+
+函数首先通过 ti->private 获取 stripe_c 结构体的指针 sc。然后，它检查传递给函数的操作是否需要执行预刷（flush）操作。如果是，那么它会根据目标 bio 的编号，使用 sc->stripe[target_bio_nr].dev->bdev 来更新 bio 的设备。这个操作完成后，函数返回 DM_MAPIO_REMAPPED。
+
+如果输入的操作是丢弃（discard）、安全擦除（secure erase）或写入零（write zeroes），那么函数会调用 stripe_map_range 函数来映射整个范围。
+
+如果输入的操作不是上述情况，那么函数会调用 stripe_map_sector 函数，将输入的块设备操作映射到具体的磁盘块。它会通过 sector 计算条带的编号 stripe，并使用 sc->stripe[stripe].physical_start 来计算出磁盘上的偏移量。最后，函数会使用更新后的偏移量和设备来更新输入的块设备操作，并返回 DM_MAPIO_REMAPPED。
+*/
+static int stripe_map(struct dm_target *ti, struct bio *bio)
+{
+	struct stripe_c *sc = ti->private;
+	uint32_t stripe;
+	unsigned int target_bio_nr;
+
+	if (bio->bi_opf & REQ_PREFLUSH) {
+		target_bio_nr = dm_bio_get_target_bio_nr(bio);
+		BUG_ON(target_bio_nr >= sc->stripes);
+		bio_set_dev(bio, sc->stripe[target_bio_nr].dev->bdev);
+		return DM_MAPIO_REMAPPED;
+	}
+	if (unlikely(bio_op(bio) == REQ_OP_DISCARD) ||
+	    unlikely(bio_op(bio) == REQ_OP_SECURE_ERASE) ||
+	    unlikely(bio_op(bio) == REQ_OP_WRITE_ZEROES)) {
+		target_bio_nr = dm_bio_get_target_bio_nr(bio);
+		BUG_ON(target_bio_nr >= sc->stripes);
+		return stripe_map_range(sc, bio, target_bio_nr);
+	}
+
+	stripe_map_sector(sc, bio->bi_iter.bi_sector,
+			  &stripe, &bio->bi_iter.bi_sector);
+
+	bio->bi_iter.bi_sector += sc->stripe[stripe].physical_start;
+	bio_set_dev(bio, sc->stripe[stripe].dev->bdev);
+
+	return DM_MAPIO_REMAPPED;
+}
+
+#if IS_ENABLED(CONFIG_FS_DAX)
+static struct dax_device *stripe_dax_pgoff(struct dm_target *ti, pgoff_t *pgoff)
+{
+	struct stripe_c *sc = ti->private;
+	struct block_device *bdev;
+	sector_t dev_sector;
+	uint32_t stripe;
+
+	stripe_map_sector(sc, *pgoff * PAGE_SECTORS, &stripe, &dev_sector);
+	dev_sector += sc->stripe[stripe].physical_start;
+	bdev = sc->stripe[stripe].dev->bdev;
+
+	*pgoff = (get_start_sect(bdev) + dev_sector) >> PAGE_SECTORS_SHIFT;
+	return sc->stripe[stripe].dev->dax_dev;
+}
+
+static long stripe_dax_direct_access(struct dm_target *ti, pgoff_t pgoff,
+		long nr_pages, enum dax_access_mode mode, void **kaddr,
+		pfn_t *pfn)
+{
+	struct dax_device *dax_dev = stripe_dax_pgoff(ti, &pgoff);
+
+	return dax_direct_access(dax_dev, pgoff, nr_pages, mode, kaddr, pfn);
+}
+
+static int stripe_dax_zero_page_range(struct dm_target *ti, pgoff_t pgoff,
+				      size_t nr_pages)
+{
+	struct dax_device *dax_dev = stripe_dax_pgoff(ti, &pgoff);
+
+	return dax_zero_page_range(dax_dev, pgoff, nr_pages);
+}
+
+static size_t stripe_dax_recovery_write(struct dm_target *ti, pgoff_t pgoff,
+		void *addr, size_t bytes, struct iov_iter *i)
+{
+	struct dax_device *dax_dev = stripe_dax_pgoff(ti, &pgoff);
+
+	return dax_recovery_write(dax_dev, pgoff, addr, bytes, i);
+}
+
+#else
+#define stripe_dax_direct_access NULL
+#define stripe_dax_zero_page_range NULL
+#define stripe_dax_recovery_write NULL
+#endif
+
+/*
+ * Stripe status:
+ *
+ * INFO
+ * #stripes [stripe_name <stripe_name>] [group word count]
+ * [error count 'A|D' <error count 'A|D'>]
+ *
+ * TABLE
+ * #stripes [stripe chunk size]
+ * [stripe_name physical_start <stripe_name physical_start>]
+ *
+ */
+
+static void stripe_status(struct dm_target *ti, status_type_t type,
+			  unsigned int status_flags, char *result, unsigned int maxlen)
+{
+	struct stripe_c *sc = (struct stripe_c *) ti->private;
+	unsigned int sz = 0;
+	unsigned int i;
+
+	switch (type) {
+	case STATUSTYPE_INFO:
+		DMEMIT("%d ", sc->stripes);
+		for (i = 0; i < sc->stripes; i++)
+			DMEMIT("%s ", sc->stripe[i].dev->name);
+
+		DMEMIT("1 ");
+		for (i = 0; i < sc->stripes; i++)
+			DMEMIT("%c", atomic_read(&(sc->stripe[i].error_count)) ?  'D' : 'A');
+		break;
+
+	case STATUSTYPE_TABLE:
+		DMEMIT("%d %llu", sc->stripes,
+			(unsigned long long)sc->chunk_size);
+		for (i = 0; i < sc->stripes; i++)
+			DMEMIT(" %s %llu", sc->stripe[i].dev->name,
+			    (unsigned long long)sc->stripe[i].physical_start);
+		break;
+
+	case STATUSTYPE_IMA:
+		DMEMIT_TARGET_NAME_VERSION(ti->type);
+		DMEMIT(",stripes=%d,chunk_size=%llu", sc->stripes,
+		       (unsigned long long)sc->chunk_size);
+
+		for (i = 0; i < sc->stripes; i++) {
+			DMEMIT(",stripe_%d_device_name=%s", i, sc->stripe[i].dev->name);
+			DMEMIT(",stripe_%d_physical_start=%llu", i,
+			       (unsigned long long)sc->stripe[i].physical_start);
+			DMEMIT(",stripe_%d_status=%c", i,
+			       atomic_read(&(sc->stripe[i].error_count)) ? 'D' : 'A');
+		}
+		DMEMIT(";");
+		break;
+	}
+}
+
+static int stripe_end_io(struct dm_target *ti, struct bio *bio,
+		blk_status_t *error)
+{
+	unsigned int i;
+	char major_minor[16];
+	struct stripe_c *sc = ti->private;
+
+	if (!*error)
+		return DM_ENDIO_DONE; /* I/O complete */
+
+	if (bio->bi_opf & REQ_RAHEAD)
+		return DM_ENDIO_DONE;
+
+	if (*error == BLK_STS_NOTSUPP)
+		return DM_ENDIO_DONE;
+
+	memset(major_minor, 0, sizeof(major_minor));
+	sprintf(major_minor, "%d:%d", MAJOR(bio_dev(bio)), MINOR(bio_dev(bio)));
+
+	/*
+	 * Test to see which stripe drive triggered the event
+	 * and increment error count for all stripes on that device.
+	 * If the error count for a given device exceeds the threshold
+	 * value we will no longer trigger any further events.
+	 */
+	for (i = 0; i < sc->stripes; i++)
+		if (!strcmp(sc->stripe[i].dev->name, major_minor)) {
+			atomic_inc(&(sc->stripe[i].error_count));
+			if (atomic_read(&(sc->stripe[i].error_count)) <
+			    DM_IO_ERROR_THRESHOLD)
+				queue_work(dm_stripe_wq, &sc->trigger_event);
+		}
+
+	return DM_ENDIO_DONE;
+}
+
+static int stripe_iterate_devices(struct dm_target *ti,
+				  iterate_devices_callout_fn fn, void *data)
+{
+	struct stripe_c *sc = ti->private;
+	int ret = 0;
+	unsigned int i = 0;
+
+	do {
+		ret = fn(ti, sc->stripe[i].dev,
+			 sc->stripe[i].physical_start,
+			 sc->stripe_width, data);
+	} while (!ret && ++i < sc->stripes);
+
+	return ret;
+}
+
+static void stripe_io_hints(struct dm_target *ti,
+			    struct queue_limits *limits)
+{
+	struct stripe_c *sc = ti->private;
+	unsigned int chunk_size = sc->chunk_size << SECTOR_SHIFT;
+
+	blk_limits_io_min(limits, chunk_size);
+	blk_limits_io_opt(limits, chunk_size * sc->stripes);
+}
+
+static struct target_type stripe_target = {
+	.name   = "striped",
+	.version = {1, 6, 0},
+	.features = DM_TARGET_PASSES_INTEGRITY | DM_TARGET_NOWAIT,
+	.module = THIS_MODULE,
+	.ctr    = stripe_ctr,
+	.dtr    = stripe_dtr,
+	.map    = stripe_map,
+	.end_io = stripe_end_io,
+	.status = stripe_status,
+	.iterate_devices = stripe_iterate_devices,
+	.io_hints = stripe_io_hints,
+	.direct_access = stripe_dax_direct_access,
+	.dax_zero_page_range = stripe_dax_zero_page_range,
+	.dax_recovery_write = stripe_dax_recovery_write,
+};
+
+int __init dm_stripe_init(void)
+{
+	int r;
+
+	dm_stripe_wq = alloc_workqueue("dm_stripe_wq", 0, 0);
+	if (!dm_stripe_wq)
+		return -ENOMEM;
+	r = dm_register_target(&stripe_target);
+	if (r < 0) {
+		destroy_workqueue(dm_stripe_wq);
+		DMWARN("target registration failed");
+	}
+
+	return r;
+}
+
+void dm_stripe_exit(void)
+{
+	dm_unregister_target(&stripe_target);
+	destroy_workqueue(dm_stripe_wq);
+}
+```
+

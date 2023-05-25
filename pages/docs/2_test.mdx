@@ -1,0 +1,210 @@
+## IaaS部分
+
+小组选择第二个任务完成实验，且本人已经有一个腾讯云服务器，故不再使用阿里云服务器部署
+
+为了方便检验实验效果，本组此实验部署到了web服务器中，并可以在8000端口访问，url地址为 http://www.mgy.cool:8000
+
+![image-20230307224927262](D:\desktop\网站文章\pictures\image-20230307224927262.png)
+
+### 实验环境
+
+腾讯云轻量服务器实例 CentOS， Golang版本16.3
+
+### 词频统计
+
+思路：
+
+1. 读取输入文本：从文件或输入流中读取需要进行词频统计的文本。
+2. 分词：将文本分解为单个的单词，一般可以使用空格、标点符号等字符进行分词。
+3. 统计词频：遍历所有分词后得到的单词，并使用一个字典（Golang 中可以使用 map）来记录每个单词出现的次数。
+4. 输出结果：将每个单词及其出现次数按照指定的格式输出，如按照单词出现次数从大到小排序后输出。
+
+主要代码如下：
+
+```go
+func countWords(paragraph string) map[string]int {
+    words := strings.Fields(paragraph)
+    counts := make(map[string]int)
+
+    for _, word := range words {
+        counts[word]++
+    }
+
+    return counts
+}
+```
+
+主要步骤：
+
+1. 连接服务器，并创建项目文件夹
+
+   ![image-20230307225259701](D:\desktop\网站文章\pictures\image-20230307225259701.png)
+
+共有3个文件，有两个html用于展示网页信息
+
+main.go的代码如下：
+
+```go
+package main
+
+import (
+    "fmt"
+    "net/http"
+    "sort"
+    "strconv"
+    "strings"
+    "html/template"
+)
+
+func countWords(paragraph string) map[string]int {
+    words := strings.Fields(paragraph)
+    counts := make(map[string]int)
+
+    for _, word := range words {
+        counts[word]++
+    }
+
+    return counts
+}
+
+type WordCount struct {
+    Word  string
+    Count int
+}
+
+type WordCounts []WordCount
+
+func (slice WordCounts) Len() int {
+    return len(slice)
+}
+
+func (slice WordCounts) Less(i, j int) bool {
+    return slice[i].Count > slice[j].Count
+}
+
+func (slice WordCounts) Swap(i, j int) {
+    slice[i], slice[j] = slice[j], slice[i]
+}
+
+func home(w http.ResponseWriter, r *http.Request) {
+    t, _ := template.ParseFiles("index.html")
+    t.Execute(w, nil)
+}
+
+func count(w http.ResponseWriter, r *http.Request) {
+    paragraph := r.FormValue("paragraph")
+    counts := countWords(paragraph)
+
+    var wordCounts WordCounts
+    for word, count := range counts {
+        wordCounts = append(wordCounts, WordCount{word, count})
+    }
+
+    sort.Sort(wordCounts)
+
+    t, _ := template.ParseFiles("wordcount.html")
+    t.Execute(w, wordCounts)
+}
+
+func main() {
+    http.HandleFunc("/", home)
+    http.HandleFunc("/wordcount", count)
+
+    fmt.Println("Server running on http://localhost:8000")
+    http.ListenAndServe(":8000", nil)
+}
+
+```
+
+wordcount.html代码如下：
+
+```html
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Word Count</title>
+  </head>
+  <body>
+    <h1>Word Count</h1>
+    <table>
+      <thead>
+        <tr>
+          <th>Word</th>
+          <th>Count</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .}}
+        <tr>
+          <td>{{.Word}}</td>
+          <td>{{.Count}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </body>
+</html>
+
+```
+
+index.html代码如下：
+
+```html
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Word Count</title>
+  </head>
+  <body>
+    <h1>Word Count</h1>
+    <form method="post" action="/wordcount">
+      <label for="paragraph">Enter a paragraph:</label><br>
+      <textarea id="paragraph" name="paragraph"></textarea><br>
+      <input type="submit" value="Count">
+    </form>
+  </body>
+</html>
+
+```
+
+2. 代码编写后，使用以下命令在后台运行程序，开启8000端口
+
+   ```bash
+   nohup go run main.go &
+   ```
+
+   
+
+![image-20230307225643122](D:\desktop\网站文章\pictures\image-20230307225643122.png)
+
+可以看到后台已经开启8000端口
+
+
+
+3. 同时检查防火墙中是否开启8000端口
+
+![image-20230307225726786](D:\desktop\网站文章\pictures\image-20230307225726786.png)
+
+可以看到已经开启端口
+
+4. 访问网站，检查实验效果
+
+![image-20230307225848966](D:\desktop\网站文章\pictures\image-20230307225848966.png)
+
+点击count
+
+![image-20230307225913760](D:\desktop\网站文章\pictures\image-20230307225913760.png)
+
+便按出现顺序从低到高实现了词频统计
+
+### 设想
+
+以下是两个使用S3和SimpleDB服务的例子：
+
+1. 图片存储和检索
+
+假设需要存储大量的图片，并能够根据关键字快速检索到相应的图片。可以使用阿里云的S3服务来存储这些图片，将其作为静态资源提供给前端页面。同时，使用SimpleDB服务来建立一个简单的数据库，将图片URL和关键字存储在其中。当用户在搜索框中输入关键字时，应用程序将查询SimpleDB数据库，并返回相应的图片URL。
+
+1. 日志数据分析
+
+可以使用阿里云的S3服务来存储日志文件，每个文件对应一个时间段。使用SimpleDB服务来建立一个简单的数据库，将每个日志文件的元数据存储在其中，包括文件名、大小、上传时间等信息。然后，使用阿里云的数据分析服务对这些日志数据进行分析和处理，生成报告和洞察，以便推出新的功能。
